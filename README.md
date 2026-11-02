@@ -1,3 +1,31 @@
+> [!NOTE]
+> **LocoManiLab modifications.** This repository is a fork of
+> [Physical-Intelligence/openpi](https://github.com/Physical-Intelligence/openpi), imported from
+> upstream commit `650c5b0283a49c42784fb5055a0507da2c6d347d` (source only, without upstream's git
+> history), and modified for the [LocoManiLab](https://github.com/Gamma-Robot/LocoManiLab)
+> benchmark (Gamma Robotics). The original Apache-2.0 [LICENSE](./LICENSE) (and
+> [LICENSE_GEMMA.txt](./LICENSE_GEMMA.txt)) apply; the changes below are provided under the same license.
+>
+> Summary of changes:
+> - pi0.5 data/policy transforms and `TrainConfig` recipes for Unitree G1 whole-body controllers
+>   (SONIC, HeFT, AMO), with base-checkpoint paths left as placeholders (`/path/to/local/pi05-base/params`).
+> - `PartialCheckpointWeightLoader`, which re-initializes only the parameters whose shapes differ
+>   from the base checkpoint (used for the wider G1 action space).
+> - A GR00T-protocol compatible policy server used by the LocoManiLab runtime, plus helper scripts and docs.
+> - The `third_party/aloha` and `third_party/libero` submodules are not included (and `third_party/`
+>   is git-ignored). To use upstream's ALOHA/LIBERO examples, clone
+>   [aloha](https://github.com/Physical-Intelligence/aloha) at `d1dc83afd89ded4379851257fe5d85632d31d5ec` and
+>   [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) at `f78abd68ee283de9f9be3c8f7e2a9ad60246e95c`
+>   into `third_party/`.
+>
+> Added files: `src/openpi/policies/g1_sonic_policy.py`, `src/openpi/policies/g1_wbc_policy.py`,
+> `deployment/run_openpi_server.py`, `scripts/download_ckpt.sh`, `docs/finetune_g1_sonic.md`,
+> `assets/pi05_g1_sonic_toilet401/IThorBathroomApproachToilet_401/norm_stats.json`,
+> `assets/pi05_g1_sonic_toilet404/IThorBathroomApproachToilet_404/norm_stats.json`,
+> `tests/test_locomanilab_g1_resources.py`.
+> Modified files: `src/openpi/training/config.py`, `src/openpi/training/weight_loaders.py`, `.gitignore`,
+> `README.md` (this section). Removed: `.gitmodules`, `third_party/aloha`, `third_party/libero` (gitlinks).
+
 # openpi
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).

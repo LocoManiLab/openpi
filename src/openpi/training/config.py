@@ -19,6 +19,8 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.g1_sonic_policy as g1_sonic_policy
+import openpi.policies.g1_wbc_policy as g1_wbc_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -352,6 +354,141 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotG1SonicDataConfig(DataConfigFactory):
+    """Data config for the G1 Sonic VLA dataset (humanoid: Unitree G1 + Dex3 hands).
+
+    Repacks the LeRobot fields into the structure expected by ``g1_sonic_policy.G1SonicInputs``:
+      - one egocentric image stream
+      - 43-dim joint state
+      - 78-dim action chunk built by concatenating motion_token + left_hand + right_hand
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "image": {"ego_view": "observation.images.ego_view"},
+                        "state": "observation.state",
+                        "actions": {
+                            "motion_token": "action.motion_token",
+                            "left_hand": "teleop.left_hand_joints",
+                            "right_hand": "teleop.right_hand_joints",
+                        },
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[g1_sonic_policy.G1SonicInputs(model_type=model_config.model_type)],
+            outputs=[g1_sonic_policy.G1SonicOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=(
+                "action.motion_token",
+                "teleop.left_hand_joints",
+                "teleop.right_hand_joints",
+            ),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotG1HeftDataConfig(DataConfigFactory):
+    """Data config for a G1 dataset collected through the **heft** controller.
+
+    Sibling of LeRobotG1SonicDataConfig; heft records the tracking policy's own reference
+    frame instead of a latent token:
+      - one egocentric image stream
+      - 29-dim joint state (body only -- heft keeps hands in a separate channel)
+      - 50-dim action = action.ref_qpos(36) + action.hands(14)
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "image": {"ego_view": "observation.images.ego_view"},
+                        "state": "observation.state",
+                        "actions": {
+                            "ref_qpos": "action.ref_qpos",
+                            "hands": "action.hands",
+                        },
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[
+                g1_wbc_policy.G1WbcInputs(
+                    model_type=model_config.model_type, layout=g1_wbc_policy.HEFT_LAYOUT
+                )
+            ],
+            outputs=[g1_wbc_policy.G1WbcOutputs(layout=g1_wbc_policy.HEFT_LAYOUT)],
+        )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action.ref_qpos", "action.hands"),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotG1AmoDataConfig(DataConfigFactory):
+    """Data config for a G1 dataset collected through the **amo** controller.
+
+    amo stores its command stream FLAT -- one `action` column (36) and one
+    `observation.state` column (32) -- not per-group columns, so both map straight across.
+    (Data collected before 2026-08-07 named the state column `states`; re-run lab prepare
+    to migrate it.)
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "image": {"ego_view": "observation.images.ego_view"},
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[
+                g1_wbc_policy.G1WbcInputs(
+                    model_type=model_config.model_type, layout=g1_wbc_policy.AMO_LAYOUT
+                )
+            ],
+            outputs=[g1_wbc_policy.G1WbcOutputs(layout=g1_wbc_policy.AMO_LAYOUT)],
+        )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action",),
         )
 
 
@@ -915,6 +1052,148 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         num_train_steps=20_000,
         batch_size=32,
+    ),
+    #
+    # Fine-tuning G1 Sonic VLA (humanoid) configs.
+    # Supply a local base with --weight-loader.params-path=/absolute/path/to/pi05-base/params.
+    #
+    # Fine-tunes pi0.5 on a Unitree G1 dataset whose action concatenates the 64-dim Sonic
+    # motion token with 7-dim left/right Dex3 hand joints (78 dim total). We bump the model's
+    # action_dim from the base 32 to 80 to fit, and use PartialCheckpointWeightLoader so that
+    # only ``action_in_proj`` / ``action_out_proj`` (the two action-dim-dependent layers in the
+    # action expert) are re-initialized; the rest of the pi05 base weights load normally.
+    TrainConfig(
+        name="pi05_g1_sonic",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=80,
+            action_horizon=16,
+        ),
+        data=LeRobotG1SonicDataConfig(
+            repo_id="2026-04-28-take-walk-and-put",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            "/path/to/local/pi05-base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=200_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=4,
+    ),
+    # LocoManiLab: the pi05_g1_sonic recipe repointed at the IThorBathroomApproachToilet
+    # datasets, so pi0.5 is scored on the same task as the other VLAs.
+    # Each repo_id needs its own norm stats first:
+    #   uv run scripts/compute_norm_stats.py --config-name pi05_g1_sonic_toilet401
+    # LocoManiLab bench: the pi05_g1_sonic recipe on the OTHER two whole-body controllers.
+    # action_dim stays 80 (as sonic) even though heft needs 50 and amo 36: same base
+    # checkpoint, same PartialCheckpointWeightLoader re-init of action_in/out_proj, one
+    # number to remember. Each needs its own norm stats first:
+    #   uv run scripts/compute_norm_stats.py --config-name pi05_bench_heft_openfridge
+    TrainConfig(
+        name="pi05_bench_heft_openfridge",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=80, action_horizon=16),
+        data=LeRobotG1HeftDataConfig(
+            repo_id="bench_heft_KitchenOpenFridge",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            "/path/to/local/pi05-base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=200_000, decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_bench_amo_closefridge",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=80, action_horizon=16),
+        data=LeRobotG1AmoDataConfig(
+            repo_id="bench_amo_KitchenCloseFridge",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            "/path/to/local/pi05-base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=200_000, decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=4,
+    ),
+    TrainConfig(
+        # 31-task all31_merged — the same data gr00t / psi0 / starVLA trained on,
+        # so the success rates land in one comparable table. Every other sonic
+        # config above is bound to a single task.
+        name="pi05_bench_sonic_all31",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=80, action_horizon=16),
+        data=LeRobotG1SonicDataConfig(
+            repo_id="all31_merged",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            "/path/to/local/pi05-base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=200_000, decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_g1_sonic_toilet401",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=80, action_horizon=16),
+        data=LeRobotG1SonicDataConfig(
+            repo_id="IThorBathroomApproachToilet_401",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            "/path/to/local/pi05-base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=200_000, decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_g1_sonic_toilet404",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=80, action_horizon=16),
+        data=LeRobotG1SonicDataConfig(
+            repo_id="IThorBathroomApproachToilet_404",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            "/path/to/local/pi05-base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=200_000, decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=20_000,
+        batch_size=32,
+        num_workers=4,
     ),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
